@@ -1,0 +1,516 @@
+rm(list = ls())
+gc()
+####----1、TCGA数据（临床+表达）下载与整理----####----------------------
+remove(list = ls())
+getwd()#[1] "/home/data/tcga.project"
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("BioinformaticsFMRP/TCGAbiolinksGUI.data")
+BiocManager::install("BioinformaticsFMRP/TCGAbiolinks")
+library(TCGAbiolinks)
+projects <- TCGAbiolinks::getGDCprojects()
+#View(projects) 
+projects$project_id 
+
+#-2.下载临床数据胃癌(TCGA-STAD)
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("GDCRNATools")
+library(GDCRNATools)
+project <- 'TCGA-STAD'
+dir.create('Clinical/')
+gdcClinicalDownload(project.id = 'TCGA-STAD', directory = 'Clinical/')
+clinical <- gdcClinicalMerge(path = 'Clinical/')
+#-3.下载RNASeq数据胃癌(TCGA-STAD)
+library(SeuratData)  
+getOption('timeout')
+options(timeout=10000)
+library(GDCRNATools)
+project <- 'TCGA-STAD'
+dir.create(path = '~/tcga.project/ExpData')
+gdcRNADownload(project.id = project,
+               data.type = 'RNAseq',
+               directory = '~/tcga.project/RawMatrix')
+dir = '~/tcga.project/RawMatrix'
+samples = list.files(dir)
+#-4.自定义函数提取count表达矩阵，合并所有样品，获取最终Counts矩阵
+metadata <-
+  gdcParseMetadata(project.id = 'TCGA-STAD', data.type = 'RNAseq')
+metadata <- gdcFilterDuplicate(metadata = metadata) 
+metadata <- gdcFilterSampleType(metadata = metadata) 
+dim(metadata)
+head(metadata)
+#-4.2 自定义函数
+rnaMerge <- function (metadata, path, data.type, organized = FALSE)
+{
+  if (organized == TRUE) {
+    filenames <-
+      file.path(path, metadata$file_name, fsep = .Platform$file.sep)
+  }
+  else {
+    filenames <- file.path(path,
+                           metadata$file_id,
+                           metadata$file_name,
+                           fsep = .Platform$file.sep)
+  }
+  if (data.type == "RNAseq") {
+    message(
+      "############### Merging RNAseq data ################\n",
+      "### This step may take a few minutes,be patient ###\n"
+    )
+    rnaMatrix <- do.call("cbind", lapply(filenames,
+                                         function(fl)
+                                           read.table(gzfile(fl), skip = 6)$V4))
+    rownames(rnaMatrix) <-
+      read.table(gzfile(filenames[1]), skip = 6)$V1
+    rownames(rnaMatrix) <-
+      unlist(lapply(strsplit(rownames(rnaMatrix),
+                             ".", fixed = TRUE), function(gene)
+                               gene[1]))
+    colnames(rnaMatrix) <- metadata$submitter_id #此处可以用sample
+    nSamples = ncol(rnaMatrix)
+    nGenes = nrow(rnaMatrix)
+    message(
+      paste("Number of samples: ", nSamples, "\n",
+            sep = ""),
+      paste("Number of genes: ", nGenes, "\n",
+            sep = "")
+    )
+    return(rnaMatrix)
+  }
+  else if (data.type == "pre-miRNAs") {
+    message(
+      "############### Merging pre-miRNAs data ################\n",
+      "### This step may take a few minutes,be patient ###\n"
+    )
+    rnaMatrix <-
+      do.call("cbind",
+              lapply(filenames, function(fl)
+                read.delim(fl)$read_count))
+    rownames(rnaMatrix) <- read.delim(filenames[1])$miRNA_ID
+    colnames(rnaMatrix) <- metadata$submitter_id #此处可以用sample
+    nSamples = ncol(rnaMatrix)
+    nGenes = nrow(rnaMatrix)
+    message(
+      paste("Number of samples: ", nSamples, "\n",
+            sep = ""),
+      paste("Number of genes: ", nGenes, "\n",
+            sep = "")
+    )
+    return(rnaMatrix)
+  }
+  else if (data.type == "miRNAs") {
+    message("############### Merging miRNAs data ###############\n")
+    mirMatrix <- lapply(filenames, function(fl)
+      cleanMirFun(fl))
+    mirs <- rownames(mirbase)
+    mirMatrix <-
+      do.call("cbind", lapply(mirMatrix, function(expr)
+        expr[mirs]))
+    rownames(mirMatrix) <-
+      mirbase$v21[match(mirs, rownames(mirbase))]
+    colnames(mirMatrix) <- metadata$submitter_id #此处可以用sample
+    mirMatrix[is.na(mirMatrix)] <- 0
+    nSamples = ncol(mirMatrix)
+    nGenes = nrow(mirMatrix)
+    message(
+      paste("Number of samples: ", nSamples, "\n",
+            sep = ""),
+      paste("Number of miRNAs: ", nGenes, "\n",
+            sep = "")
+    )
+    return(mirMatrix)
+  }
+  else {
+    return("error !!!")
+  }
+}
+allCounts.exp <-
+  rnaMerge(metadata = metadata ,
+           path = '~/tcga.project/RawMatrix',
+           data.type = 'RNAseq')
+library(data.table)
+ensembl_gene_id <- rownames(allCounts.exp) 
+allCounts.exp <- cbind(ensembl_gene_id, allCounts.exp)  
+fwrite(allCounts.exp,"~/tcga.project/RawMatrix/allCounts.exp.txt")
+#-5.把基因Ensembl Gene ID 转换为Gene symbl
+library(clusterProfiler)
+library(biomaRt)
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+human_list = listFilters(human)
+load(file = "./biomaRt_ensembl_annotation.Rdata")
+head(human_list)
+data.ID.change <-  allCounts.exp 
+gene.df.ID <- bitr(ensembl_gene_id, fromType = "ensembl_gene_id",
+                   toType = c("hgnc_symbol","entrezgene_id"),
+                   OrgDb = human) 
+library(dplyr)
+gene.df.ID <- gene.df.ID %>% 
+  distinct(hgnc_symbol, .keep_all = TRUE)
+
+head(gene.df.ID)
+#6. 提取不同基因类型的Counts表达矩阵，protein_coding、lncRNA、miRNA等。
+library(data.table)
+tmp <- fread("~/tcga.project/RawMatrix/allCounts.exp.txt")
+tmp[1:5,1:5]
+gene.df.ID[1:5,]
+tmp.merged_data <- merge(tmp, gene.df.ID, by = "ensembl_gene_id")
+tmp2 <- cbind(tmp.merged_data[,1],tmp.merged_data[,450:453])
+tmp2 <- cbind(tmp2,tmp.merged_data[,2:449])
+tmp2[1:4,1:7]
+tmp2 <- tmp2 %>%
+  distinct(hgnc_symbol, .keep_all = TRUE)
+fwrite(tmp2,"~/tcga.project/RawMatrix/allgenetype.Counts.exp.txt")
+library(stringr)
+table(substr(colnames(tmp2[,-c(1:5)]),14,15))
+tumor <- colnames(tmp2[,-c(1:5)])[substr(colnames(tmp2[,-c(1:5)]),14,15) == "01"]
+normal <- colnames(tmp2[,-c(1:5)])[substr(colnames(tmp2[,-c(1:5)]),14,15) == "11"]
+length(tumor)
+length(normal)
+mRNA.Count <- as.data.frame(tmp2[tmp2$transcript_biotype == "protein_coding", ])
+lnRNA.Count <- as.data.frame(tmp2[tmp2$transcript_biotype == "lncRNA", ])
+miRNA.Count <- as.data.frame(tmp2[tmp2$transcript_biotype == "miRNA", ])
+snRNA.Count <- as.data.frame(tmp2[tmp2$transcript_biotype == "snRNA", ])
+#-7.样本筛选；以mRNA编码基因为例，将样本分为肿瘤样品、正常样品，并排序
+gene_symbl <- mRNA.Count$hgnc_symbol
+mRNA.Count <- cbind(gene_symbl,mRNA.Count[,-c(1:5)])
+rownames(mRNA.Count) <- gene_symbl
+tumor_sample <- mRNA.Count[,tumor]
+length(tumor_sample)
+normal_sample <- mRNA.Count[,normal]
+length(normal_sample)
+mRNA.Count.group <- cbind(tumor_sample,normal_sample) 
+#-8. 基因过滤，过滤低表达基因
+zero_percentage <- rowMeans(mRNA.Count.group == 0)
+mRNA.Count.group <- mRNA.Count.group[zero_percentage < 0.5, ]
+dim(mRNA.Count.group)
+gene_name <- rownames(mRNA.Count.group)
+mRNA.Count.group2 <- cbind(gene_name,mRNA.Count.group)
+rownames(mRNA.Count.group2) <- gene_name
+fwrite(mRNA.Count.group2,"./mRNA.Count.txt") 
+#-9. Counts矩阵转cpm/fpkm/tpm矩阵
+library(edgeR)
+mRNA.Cpm <- cpm(mRNA.Count.group) #cpm
+mRNA.Cpm[1:6,1:6]
+mRNA.Cpm.log <- log2(mRNA.Cpm+ 1) #cpm log transformed
+mRNA.Cpm.log[1:6,1:6]
+library(dplyr)
+library(data.table)
+gene_length <- fread("hg19gene.txt",data.table = F)
+colnames(gene_length) <- c("gene_name","Length")
+gene_count <- fread("./mRNA.Count.txt",data.table = F)
+count_length <- inner_join(gene_length,gene_count) 
+tpm_value <- count_length
+for (i in 3:ncol(count_length)) {
+  result <-
+    round((count_length[, i] * 1000 * 1000000) / (count_length[, 2] * sum((
+      count_length[, i] * 1000 / count_length[, 2]
+    ))), 3)
+  tpm_value[, i] <- result
+}
+
+mRNA.Tpm <- tpm_value[,-2]
+dim(mRNA.Tpm) 
+fwrite(mRNA.Tpm,"./mRNA.Tpm.txt")
+write.csv(mRNA.Tpm, "./mRNA.Tpm.csv", row.names = T)
+fpkm_value <- count_length
+for (i in 3:ncol(count_length)) {
+  result <- round((count_length[,i]*1000*1000000)/(count_length[,2]*as.numeric(sum(count_length[,i]))),3)
+  fpkm_value[,i] <- result
+}
+mRNA.Fpkm <- fpkm_value[,-2]
+dim(mRNA.Fpkm)
+fwrite(mRNA.Fpkm,"./mRNA.Fpkm.txt")
+#-10. 获取癌和癌旁相匹配的样品
+library(stringr)
+barcode1 <- str_sub(colnames(tumor_sample), 1, 12)
+barcode2 <- str_sub(colnames(normal_sample), 1, 12)
+intersection <- intersect(barcode1, barcode2)
+length(intersection)
+barcode_normal <- paste0(intersection, "-11A")
+barcode_tumor <- paste0(intersection, "-01A")
+normal.paired <- mRNA.Count.group[,barcode_normal]
+tumor.paired <- mRNA.Count.group[,barcode_tumor]
+mRNA.Count.paried <- cbind(tumor.paired,normal.paired)#tumor在前，normal在后
+mRNA.Count.paried[1:4,33:34]\
+####----11、临床信息下载与整理----####
+json <- jsonlite::fromJSON("metadata.cart.2024-03-21.json")
+entity_submitter_id <- sapply(json$associated_entities,function(x){x[,1]})
+case_id <- sapply(json$associated_entities,function(x){x[,3]})
+sample_case <- t(rbind(entity_submitter_id,case_id))
+clinical <- read_tsv('clinical.tsv')
+class(clinical)
+nrow(clinical) 
+clinical <- as.data.frame(clinical[duplicated(clinical$case_id),]) 
+class(clinical)
+nrow(clinical) 
+matrix <- merge(sample_case,clinical,by="case_id",all.x=T)
+nrow(matrix) 
+colnames(clinical)
+demo <- c("case_submitter_id","age_at_index","ethnicity","gender","race",
+          "vital_status","days_to_death","days_to_last_follow_up",
+          "ajcc_pathologic_stage","ajcc_pathologic_t","ajcc_pathologic_m",
+          "ajcc_pathologic_n","treatment_type")
+
+matrix = matrix[,demo] 
+head(matrix)
+colnames(matrix) <- c("ID","Age","Ethnicity","Gender","Race",
+                      "Status","days_to_death","days_to_last_follow_up",
+                      "Stage","T","M","N","Treatment") 
+
+head(matrix)
+nrow(matrix) 
+matrix = matrix[matrix$Status %in% c('Alive','Dead'),] 
+nrow(matrix) 
+class(matrix)
+matrix$days_to_last_follow_up <- as.numeric(matrix$days_to_last_follow_up)
+matrix$days_to_death <- as.numeric(matrix$days_to_death)
+matrix$Age <- as.numeric(matrix$Age)
+matrix$days_to_last_follow_up[is.na(matrix$days_to_last_follow_up)] = 0 
+matrix$days_to_death[is.na(matrix$days_to_death)] = 0   
+matrix$Age [is.na(matrix$Age )] = 0 
+####
+matrix$days <- ifelse(matrix$Status=='Alive',matrix$days_to_last_follow_up,matrix$days_to_death)
+head(matrix)
+# matrix$days <- as.numeric(unlist(matrix$days))
+# matrix$days[is.na(matrix$days)] = 0 
+matrix$month=round(matrix$days/30,0) 
+head(matrix)
+matrix$OS <- ifelse(matrix$Status == "Alive", 0, 1)
+matrix$OS.time <- floor(matrix$month/12)
+head(matrix)
+write.csv(matrix, "./TCGA_STAD-cli.csv", row.names = T)
+sample_group <- ifelse(
+  as.numeric(str_sub(colnames(mRNA.Count.group),14,15)) < 10,"tumor","normal"
+)
+
+exp2 <- mRNA.Count.group[,sample_group == c("tumor")]
+dim(exp2)
+colnames(exp2) <- substring(colnames(exp2), 1, 12)
+cl3 <- matrix[match(colnames(exp2),matrix$ID),]
+cl3 <- cl3[-c(299),]
+cl <- exp2[,-c(299)]
+head(colnames(exp2))
+head(cl3$ID)
+str(colnames(exp2))
+str(cl3$ID)
+all.equal(colnames(cl),cl3$ID) 
+identical(colnames(cl),cl3$ID) 
+rownames(cl3) = cl3[,1]
+cl3 <- cl3[,-1]
+View(cl3)
+View(exp2)
+save(cl3,exp2,cl,matrix,file = c("survival_data.Rdata"))
+write.csv(cl, "./TCGA_STAD-tumor.csv", row.names = T)
+write.csv(cl3, "./TCGA_STAD-clifinal.csv", row.names = T)
+####----12、利用临床数据与表达数据结合，获取有预后价值的COX单基因----####
+load("Cox_data.Rdata")
+vsd <- vst(exp3, blind = FALSE)  
+library(DESeq2)
+View(vsd)
+library(survival)
+cox_res <- apply(vsd, 1, function(x){
+  surv <- Surv(cl3$days, cl3$OS)
+  group <- ifelse(x > median(x),"High","Low") 
+  group <-factor(group,levels = c("Low","High"))
+  fit <- coxph(surv ~ group)
+  tmp <- broom::tidy(fit,exponentiate = T, conf.int = T)
+})
+res.cox <- do.call(rbind, cox_res)
+res.cox$gene_symbol <- rownames(vsd)
+View(res.cox)
+table(res.cox$p.value<0.05)
+cox_cli <- res.cox$gene_symbol[res.cox$p.value<0.05]
+View(res.cox)
+cox_cli <- res.cox[res.cox[,5]<0.05,]
+View(cox_cli)
+############
+library(survival)
+logrank_res <- apply(vsd, 1, function(x){
+  surv <- Surv(cl3$days, cl3$OS)
+  group <- ifelse(x > median(x),"High","Low") 
+  fit <- survdiff(surv ~ group)
+  pvalue <- 1-pchisq(fit$chisq, df=1)
+})
+identical(colnames(vsd),rownames(cl3))
+res.logrank <- data.frame(gene_symbol = rownames(vsd), pvalue = logrank_res)
+res.logrank <- res.logrank[order(res.logrank$pvalue),]
+table(res.logrank$pvalue<0.05)
+View(cox_cli)
+df.tmp <- data.frame(time = cl3$days,event=cl3$OS,group=c(group))
+survdiff(Surv(time,event)~group, data = df.tmp)
+f1 <- survfit(Surv(time,event)~group, data = df.tmp)
+pdf(file = 'PWWP3B-cox.pdf')
+group <- ifelse(t(vsd)[,"HAVCR1"] >median(t(vsd)[,"HAVCR1"]),"high","low")
+df.tmp <- data.frame(time = cl3$days,event=cl3$OS,group=c(group))
+survdiff(Surv(time,event)~group, data = df.tmp)
+f1 <- survfit(Surv(time,event)~group, data = df.tmp)
+pdf(file = 'HAVCR1-cox.pdf')
+ggsurvplot(f1,pval = T,palette = "lancet",risk.table.col = "Survival state",legend.labs = c("HAVCR1-High","HAVCR1-Low"),xlab = "Survival time(days)",
+           ylab = "Survival probablity")
+dev.off()
+group <- ifelse(t(vsd)[,"CLDN6"] >median(t(vsd)[,"CLDN6"]),"high","low")
+df.tmp <- data.frame(time = cl3$days,event=cl3$OS,group=c(group))
+survdiff(Surv(time,event)~group, data = df.tmp)
+f1 <- survfit(Surv(time,event)~group, data = df.tmp)
+pdf(file = 'CLDN6-cox.pdf')
+ggsurvplot(f1,pval = T,palette = "lancet",risk.table.col = "Survival state",legend.labs = c("CLDN6-High","CLDN6-Low"),xlab = "Survival time(days)",
+           ylab = "Survival probablity")
+dev.off()
+cox_cli <- res.cox$gene_symbol[res.cox$p.value<0.05]
+logrank <- res.logrank$gene_symbol[res.logrank$pvalue<0.05]
+l <- list(logrank = logrank, cox=cox_cli)
+venn.plot <-venn.diagram(l,fill=c("#acd385","#cbb0cf"), filename=NULL,scaled = FALSE)
+grid.draw(venn.plot)
+cox_cli <- res.cox[res.cox[,5]<0.05,]
+##----13、应用edgeR进行差异分析----####-----------------------------------------------------
+counts <- mRNA.Count.group
+library(edgeR)
+group <- factor(ifelse(substr(colnames(counts), 14, 15) == "01", "Tumor", "Normal"),
+                levels = c("Normal", "Tumor"))
+design <- model.matrix(~0+group)
+rownames(design) = colnames(counts)
+colnames(design) <- levels(group)
+DGElist <- DGEList(counts = counts, group = group)
+keep_gene <- rowSums(cpm(DGElist) > 1) >= 2
+DGElist <- DGElist[keep_gene, keep.lib.sizes = FALSE]
+DGElist <- calcNormFactors(DGElist)
+DGElist <- estimateGLMCommonDisp(DGElist, design)
+DGElist <- estimateGLMTrendedDisp(DGElist, design)
+DGElist <- estimateGLMTagwiseDisp(DGElist, design)
+fit <- glmFit(DGElist, design)
+result.fit <- glmLRT(fit, contrast = c(-1, 1))
+DEG.edgeR <- as.data.frame(topTags(result.fit, n = nrow(DGElist)))
+nrow(DEG.edgeR)
+res_edgeR <- as.data.frame(DEG.edgeR) %>%
+  arrange(FDR ) %>%
+  dplyr::filter(abs(logFC) > 1, FDR < 0.05) 
+nrow(res_edgeR)
+#####################比较淋巴结（T1分期：NX:N0）
+library(edgeR)
+meta <- fread("~/TCGA-clinical.project/差异分析/deseq2/T1.txt")
+meta <- as.data.frame(meta)
+meta <- avereps(meta,meta$ID)
+meta <- as.data.frame(meta)
+rownames(meta) <- meta$Id
+load("mRNA.Count.group.rds")
+counts <- mRNA.Count.group
+nrow(counts)
+counts[1:4,1:4]
+colnames(counts) <- substr(colnames(counts), 1, 12)
+index = rownames(meta)[rownames(meta) %in% colnames(counts)]
+meta=meta[index,]
+counts <- as.data.frame(counts)
+counts=counts[,index]
+group=c(rep('Control',16),rep('Treatment',5))
+library(edgeR)
+group <- factor(group)
+design <- model.matrix(~0+group)
+rownames(design) <- colnames(counts)
+colnames(design) <- levels(group)
+DGElist <- DGEList(counts = counts, group = group)
+keep_gene <- rowSums(cpm(DGElist) > 1) >= 2
+DGElist <- DGElist[keep_gene, keep.lib.sizes = FALSE]
+DGElist <- calcNormFactors(DGElist)
+DGElist <- estimateGLMCommonDisp(DGElist, design)
+DGElist <- estimateGLMTrendedDisp(DGElist, design)
+DGElist <- estimateGLMTagwiseDisp(DGElist, design)
+fit <- glmFit(DGElist, design)
+result.fit <- glmLRT(fit, contrast = c(-1, 1))
+DEG.edgeR <- as.data.frame(topTags(result.fit, n = nrow(DGElist)))
+nrow(DEG.edgeR) 
+##----14、利用edge得到的差异基因取交集，分别作差异表达火山图----####
+log2FC_cutoff = 4.0
+if (T) {
+  #根据Padj筛选
+  NT_deg.genes <-
+    rownames(res_edgeR[with(res_edgeR,
+                   abs(logFC) > log2FC_cutoff & PValue < p_cutoff), ])
+  T1_deg.genes <-
+    rownames(res_edgeR_T1)
+  COX_deg.genes <-
+    cox_cli$gene_symbol
+}
+deg.gene.list <-
+  list(NT = NT_deg.genes,
+       T1 = T1_deg.genes,
+       COX = COX_deg.genes)
+str(deg.gene.list)
+library(ggplot2)
+#install.packages("ggVennDiagram")
+library(ggVennDiagram)
+#三包相交
+pdf("DEG1-HAVCR1.pdf")
+ggVennDiagram(deg.gene.list,
+              label = "count", 
+              label_color = "black",
+              label_alpha = 0.0,
+              edge_lty = "solid", 
+              edge_size = 1.2) +
+  scale_fill_gradientn(colors = c( "white", "#1E90FF","#00BFFF"),
+                       name = "Gene count")
+dev.off()
+##做火山图，标出差异基因
+load("DEG.edgeR_T1.rda")
+library(data.table)
+library(ggplot2)
+library(ggprism)
+library(ggrepel) 
+library(ggpubr)
+library(ggthemes)
+DEG.edgeR_T1=DEG.edgeR
+DEG.edgeR_T1$group = 'Stable'#添加一组
+DEG.edgeR_T1$group[which((DEG.edgeR_T1$PValue <0.05)&(DEG.edgeR_T1$logFC >1))]='Up'#上调基因
+DEG.edgeR_T1$group[which((DEG.edgeR_T1$PValue <0.05)&(DEG.edgeR_T1$logFC < -1))]='Down'#下调基因
+mygene <- c("HAVCR1", "CLDN6") 
+DEG.edgeR_T1$gene_name = rownames(DEG.edgeR_T1)
+DEG.edgeR_T1$label <- ifelse(DEG.edgeR_T1$gene_name %in% mygene, DEG.edgeR_T1$gene_name, "")
+pdf(file="T1-火山图.pdf")
+ggplot(DEG.edgeR_T1, aes(x = logFC, y = -log10(PValue), colour = group)) +
+  geom_point(alpha = 0.85, size = 1.5) +  
+  scale_color_manual(values = c('steelblue', 'gray', 'brown')) + 
+  xlim(c(-11, 11)) +  
+  geom_vline(xintercept = c(-2, 2), lty = 4, col = "black", lwd = 0.8) + 
+  geom_hline(yintercept = -log10(0.05), lty = 4, col = "black", lwd = 0.8) + 
+  labs(x = "logFC", y = "-log10(PValue)") +
+  ggtitle("TCGA-STAD-T1-LNM-DEGs") +  
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "right", legend.title = element_blank()) +  
+  geom_label_repel(data = DEG.edgeR_T1, aes(label = label),  
+                   size = 3, box.padding = unit(0.5, "lines"),
+                   point.padding = unit(0.8, "lines"),
+                   segment.color = "black",
+                   show.legend = FALSE, max.overlaps = 10000) +  
+  theme_prism(border = TRUE)  
+dev.off()
+##做火山图，标出差异基因
+load("DEG.edgeR_NT.rda")
+library(data.table)
+library(ggplot2)
+library(ggprism)
+library(ggrepel) 
+library(ggpubr)
+library(ggthemes)
+DEG.edgeR_NT=DEG.edgeR
+DEG.edgeR_NT$group = 'Stable'#添加一组
+DEG.edgeR_NT$group[which((DEG.edgeR_NT$PValue <0.05)&(DEG.edgeR_NT$logFC >4))]='Up'#上调基因
+DEG.edgeR_NT$group[which((DEG.edgeR_NT$PValue <0.05)&(DEG.edgeR_NT$logFC < -4))]='Down'#下调基因
+mygene <- c("HAVCR1", "CLDN6") 
+DEG.edgeR_NT$gene_name = rownames(DEG.edgeR_NT)
+DEG.edgeR_NT$label <- ifelse(DEG.edgeR_NT$gene_name %in% mygene, DEG.edgeR_NT$gene_name, "")
+pdf(file="NT-火山图.pdf")
+ggplot(DEG.edgeR_NT, aes(x = logFC, y = -log10(PValue), colour = group)) +
+  geom_point(alpha = 0.85, size = 1.5) +  
+  scale_color_manual(values = c('steelblue', 'gray', 'brown')) + 
+  xlim(c(-11, 11)) +  
+  geom_vline(xintercept = c(-2, 2), lty = 4, col = "black", lwd = 0.8) + 
+  geom_hline(yintercept = -log10(0.05), lty = 4, col = "black", lwd = 0.8) + 
+  labs(x = "logFC", y = "-log10(PValue)") +
+  ggtitle("TCGA-STAD-NT-DEGs") +  
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "right", legend.title = element_blank()) +  
+  geom_label_repel(data = DEG.edgeR_NT, aes(label = label),  
+                   size = 3, box.padding = unit(0.5, "lines"),
+                   point.padding = unit(0.8, "lines"),
+                   segment.color = "black",
+                   show.legend = FALSE, max.overlaps = 10000) +  
+  theme_prism(border = TRUE)  
+dev.off()
