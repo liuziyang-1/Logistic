@@ -1,0 +1,299 @@
+rm(list = ls())
+gc()
+library(rms)
+library(survival)
+library("readxl")
+mydata <- read_excel("SPSS.xlsx")
+str(mydata)
+head(mydata)
+library(tidyverse)
+colnames(mydata)
+str(mydata)
+monofactor <- list()
+for (i in c(1:32)) {
+  print(i)
+  f <- glm(as.formula(paste0("Node_metastasis ~",colnames(mydata)[i])),
+           data = mydata,
+           family = binomial())
+  monofactor[[i]] <- summary(f)
+}
+monofactor
+coef(f)
+exp(coef(f))
+confint(monofactor)
+exp (confint(monofactor))
+multi <- glm(Node_metastasis ~ Histologic_type + Ulceration + Tumor_size,
+             data = mydata, 
+             family = binomial())
+###multi <- glm(Node_metastasis ~ Histologic_type + Ulceration + Tumor_size + IHC,
+             data = mydata, 
+             family = binomial())
+summary(multi)
+final <- lrm(Node_metastasis ~ Histologic_type + Ulceration + Tumor_size,
+             data = mydata, x = T, y = T)  
+final  
+library(Hmisc)
+v<-validate(final, method="boot", B=1000, dxy=T)
+Dxy = v[rownames(v)=="Dxy", colnames(v)=="index.corrected"]
+bias_corrected_c_index  <- abs(Dxy)/2+0.5
+bias_corrected_c_index 
+install.packages("ResourceSelection")
+library(ResourceSelection)
+hl <- glm(Node_metastasis ~ Histologic_type + Ulceration + Tumor_size,
+          data = mydata, 
+          family = binomial())
+hoslem.test(mydata$Node_metastasis,fitted(hl),g=10)
+mydata1 <- datadist(mydata)
+options(datadist="mydata1")
+nom1 <- nomogram(final, fun = plogis, 
+                 lp = F,  
+                 fun.at = c(0.005,0.01,0.05,seq(0.1, 0.9, by = 0.05),0.95,1), 
+                 funlabel = "LNM Risk")  
+plot(nom1) 
+pdf("logistic列线图.pdf")
+plot(nom1, 
+     xfrac=.35, 
+     cex.var=1, 
+     cex.axis=0.8,
+     tcl=-0.5,
+     lmgp=0.3, 
+     label.every=1, 
+     naxes=13,
+     col.grid=gray(c(0.8, 0.95)),
+     lplabel='Linear Predictorlp', 
+     points.label='Points', 
+     total.points.label='Total Points',
+     force.label=T
+)
+dev.off()
+library(pROC)
+roc_train <- roc(Node_metastasis~predict(final),data=mydata)
+pdf("logisticROC曲线.pdf")
+plot(roc_train,
+     print.auc=TRUE,
+     auc.polygon=TRUE,
+     max.auc.polygon=TRUE,
+     auc.polygon.col="skyblue",
+     print.thres=TRUE,
+     main="ROC CURVE",
+     col="red",
+     print.thres.col="black",
+     identity.col="blue",
+     identity.lty=1,
+     identity.lwd=1)
+dev.off()
+roc_train$auc
+ci(roc_train)
+cutoff_train <- coords(roc_train, "best", ret = "threshold")
+cutoff_train
+spe_train <- coords(roc_train, "best")$specificity
+spe_train
+sen_train <- coords(roc_train, "best")$sensitivity
+sen_train
+
+cal_train <- calibrate(final,
+                       method='boot',
+                       m = 50,
+                       B=1000)
+pdf("logistic校准曲线.pdf")
+plot(cal_train,
+     xlim = c(0,1),
+     xlab = "Predicted Probability",
+     ylab = "Observed Probability",
+     legend = FALSE,
+     subtitles = FALSE)
+abline(0,1,col = "black",lty = 2,lwd = 2)
+lines(cal_train[,c("predy","calibrated.orig")], 
+      type = "l",lwd = 2,col="red",pch =16)
+lines(cal_train[,c("predy","calibrated.corrected")], 
+      type = "l",lwd = 2,col="green",pch =16)
+legend(0.55,0.40,
+       c("Ideal","Apparent","Bias-corrected"),
+       lty = c(2,1,1),
+       lwd = c(2,1,1),
+       col = c("black","red","green"),
+       bty = "n") 
+dev.off()
+
+library(rmda)
+dca_train <- decision_curve(Node_metastasis ~ Histologic_type + Ulceration + Tumor_size,
+                            data = mydata,family = binomial(link="logit"),
+                            thresholds = seq(0,1,by = 0.01),
+                            confidence.intervals = 0.95,
+                            study.design = "case-control",
+                            population.prevalence = 0.3)
+pdf("logistic决策曲线.pdf")
+plot_decision_curve(dca_train,
+                    curve.names = "LNM probability",
+                    cost.benefit.axis = F,
+                    col = "red",
+                    confidence.intervals = F,
+                    standardize = T,
+                    legend.position = "topright")
+dev.off()
+
+library(pROC)
+predictions <- as.numeric(predictions)
+class(mydata$Histologic_type)
+class(mydata$Age)
+predictions <- as.ordered(mydata$Histologic_type)
+prediction1 <- as.ordered(mydata$Age)
+prediction2 <- as.ordered(mydata$CT_reported_LN_status)
+prediction3 <- as.ordered(mydata$Tumor_location)
+prediction4 <- as.ordered(mydata$Tumor_size)
+prediction5 <- as.ordered(mydata$Macroscopic_type)
+prediction6 <- as.ordered(mydata$Ulceration)
+roc1<- roc(mydata$Node_metastasis, predictions)
+roc2<- roc(mydata$Node_metastasis, prediction1)
+roc3<- roc(mydata$Node_metastasis, prediction2)
+roc4<- roc(mydata$Node_metastasis, prediction3)
+roc5<- roc(mydata$Node_metastasis, prediction4)
+roc6<- roc(mydata$Node_metastasis, prediction5)
+roc7<- roc(mydata$Node_metastasis, prediction6)
+round(auc(roc1),3)##AUC
+round(ci(roc1),3)##95%CI
+round(auc(roc2),3)##AUC
+round(ci(roc2),3)##95%CI
+round(auc(roc3),3)##AUC
+round(ci(roc3),3)##95%CI
+round(auc(roc4),3)##AUC
+round(ci(roc4),3)##95%CI
+round(auc(roc5),3)##AUC
+round(ci(roc5),3)##95%CI
+round(auc(roc6),3)##AUC
+round(ci(roc6),3)##95%CI
+round(auc(roc7),3)##AUC
+round(ci(roc7),3)##95%CI
+plot(roc1,col="wheat",legacy.axes=T)
+plot(roc2, add=TRUE, col="turquoise2")
+plot(roc3, add=TRUE, col="seagreen")
+plot(roc4, add=TRUE, col="violetred2")
+plot(roc5, add=TRUE, col="thistle2")
+plot(roc6, add=TRUE, col="tan2")
+plot(roc7, add=TRUE, col="steelblue4")
+round(auc(roc1),3)##AUC  _AUC_0.679
+round(auc(roc2),3)##AUC  _AUC_0.643
+round(auc(roc3),3)##AUC  _AUC_0.573
+round(auc(roc4),3)##AUC  _AUC_0.635
+round(auc(roc5),3)##AUC  _AUC_0.736
+round(auc(roc6),3)##AUC  _AUC_0.685
+round(auc(roc7),3)##AUC  _AUC_0.667
+pdf("logisticROC汇总曲线.pdf")
+plot(roc1,col="wheat",legacy.axes=T)
+plot(roc2, add=TRUE, col="turquoise2")
+plot(roc3, add=TRUE, col="seagreen")
+plot(roc4, add=TRUE, col="violetred2")
+plot(roc5, add=TRUE, col="thistle2")
+plot(roc6, add=TRUE, col="tan2")
+plot(roc7, add=TRUE, col="steelblue4")
+legend("bottomright", legend=c('Histologic type AUC: 0.679',
+                               "Age AUC: 0.643",
+                               "CT reported LN status AUC: 0.573",
+                               "Tumor location AUC: 0.635",
+                               "Tumor size AUC: 0.736",
+                               'Macroscopic type AUC: 0.685',
+                               'Ulceration AUC: 0.667'),
+       col=c("seashell","turquoise","seagreen","violetred",'thistle2',
+             'tan2',"steelblue4"),
+       lty=2,lwd=8,cex=0.75)
+dev.off()
+
+#bootstrap 
+library(caret)
+install.packages("Ecdat")
+library(Ecdat)
+train.control_7 <-trainControl(method = "boot",
+                               number=1000)
+LogMod7 <- train(form.bestglm, 
+                 data=datamy, 
+                 trControl=train.control_7, 
+                 method="glm")
+LogMod7
+train.control_8 <-trainControl(method = "boot",
+                               number=1000,
+                               classProbs=TRUE,
+                               summaryFunction=twoClassSummary)
+datamy<-as.data.frame(mydata)
+datamy$Node_metastasis <- factor(datamy$Node_metastasis, levels = c(0,1),labels = c("No","Yes"))
+form.bestglm<-as.formula(Node_metastasis ~ Histologic_type + Ulceration + Tumor_size)
+LogMod8 <- train(form.bestglm, 
+                 data=datamy, 
+                 trControl=train.control_8, 
+                 method="glm")
+LogMod8
+library(pROC)
+fit.full <- glm(Node_metastasis ~ Histologic_type + Ulceration + Tumor_size, data = mydata)
+datamy$predfit.full<- predict(newdata=datamy,fit.full,"response")
+pred <- datamy$predfit.full
+labels <-datamy$Node_metastasis
+n_bootstraps <- 1000 
+roc_boot <- NULL 
+for (i in 1:n_bootstraps) {
+  boot_indices <- sample(length(pred), replace = TRUE)
+  boot_pred <- pred[boot_indices]
+  boot_labels <- labels[boot_indices]
+  roc_boot[[i]] <- roc(boot_labels, boot_pred)
+}
+pdf("logisticROC-Bootstrap-ROC曲线.pdf")
+plot(roc_boot[[1]], type = "n",auc.polygon=TRUE,grid=c(0.5, 0.2), 
+     grid.col=c("black", "black"), 
+     main = "Bootstrap ROC Curve", xlab = "False Positive Rate", ylab = "True Positive Rate")
+for (i in 1:n_bootstraps) {
+  lines(roc_boot[[i]], col = "skyblue", alpha = 0.2)
+}
+roc_mean <- roc(labels,pred,ci=TRUE)  
+lines(roc_mean, col = "#FFFF99", lwd = 2,print.auc=TRUE,
+      print.auc.x=0.4, print.auc.y=0.5, auc.polygon=TRUE,grid=c(0.5, 0.2),
+      grid.col=c("black", "black"),  
+      print.thres=TRUE,
+      main="Comparison of two ROC curves")  
+legend("bottomright", legend = c("Bootstrap ROC", "Mean ROC(AUC = 0.8336)"), col = c("skyblue", "#FFFF99"), lwd = c(1, 2), bty = "n",cex=0.65,pt.cex= 3)
+roc_mean
+dev.off()
+plot(roc_mean,
+     print.auc=TRUE,
+     auc.polygon=TRUE,
+     max.auc.polygon=TRUE,
+     auc.polygon.col="skyblue",
+     print.thres=TRUE,
+     main="ROC CURVE",
+     col="red",
+     print.thres.col="black",
+     identity.col="blue",
+     identity.lty=1,
+     identity.lwd=1)
+
+multi.new <- glm(Node_metastasis ~ Histologic_type + Ulceration + Tumor_size + IHC,
+             data = mydata, 
+             family = binomial())
+multi.old <- glm(Node_metastasis ~ Histologic_type + Ulceration + Tumor_size,
+                 data = mydata, 
+                 family = binomial())
+datamy=as.data.frame(mydata)#####
+pstd = multi.old$fitted.values
+pnew = multi.new$fitted.values
+#install.packages("PredictABEL")
+library(PredictABEL)
+reclassification(data=as.data.frame(mydata),
+                 cOutcome = 3,
+                 predrisk1 = pstd,
+                 predrisk2 = pnew,
+                 cutoff = c(0,0.02,0.45,1))
+pdf("比较ROC曲线.pdf")
+plotROC(data=mydata, 
+        cOutcome=3, 
+        predrisk=cbind(pstd,pnew),
+        labels=c("Conventional Model","Conventional Model +HAVCR1"))
+dev.off()
+
+library(rms)
+dd=datadist(mydata)
+options(datadist="dd")
+fit.glm<- lrm(formula=form.old,data=mydata,x=TRUE,y=TRUE)  
+fit2.glm<- lrm(formula=form.new,data=mydata,x=TRUE,y=TRUE)
+mydata$predvalue <- predict(fit.glm)
+
+mydata$predvalue2<-predict(fit2.glm)
+modelROC <- roc(mydata$Node_metastasis,mydata$predvalue)
+modelROC2 <- roc(mydata$Node_metastasis,mydata$predvalue2)     
+roc.test(modelROC,modelROC2 )
